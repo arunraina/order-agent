@@ -125,6 +125,20 @@ function confirmHandler(req, res) {
 // toBuyerLine/toBuyerOrder (src/buyer-view.js) are what keep this route
 // buyer-safe: no score, no sku_code, no raw candidate list.
 
+// candidates[].stock in a line is a snapshot taken when the order was
+// created (or last chosen) — another order can draw the same SKU down in
+// the meantime, so trusting that stored number here would show, and let an
+// operator approve against, a stock position that's already wrong. Every
+// read path recomputes it live instead; only the write path (confirm,
+// which already calls checkStock() itself via decide.js) needs the truth
+// at the instant of decision, and it already gets that independently.
+function withLiveStock(lines) {
+  return lines.map((l) => ({
+    ...l,
+    candidates: (l.candidates || []).map((c) => ({ ...c, stock: checkStock(c.sku_code, l.quantity) })),
+  }));
+}
+
 // Once nothing is left "pending" (every line auto-matched, or the buyer
 // has picked a candidate or left a note for every ambiguous/no_match one),
 // the order moves from "submitted" to "in_review" — there's nothing more
@@ -162,7 +176,7 @@ async function createOrderRecordHandler(req, res) {
 async function getOrderRecordHandler(req, res) {
   try {
     const { order, lines } = await getOrder(req.params.id);
-    res.json({ order: toBuyerOrder(order), lines: lines.map(toBuyerLine) });
+    res.json({ order: toBuyerOrder(order), lines: withLiveStock(lines).map(toBuyerLine) });
   } catch (err) {
     res.status(404).json({ error: "order not found" });
   }
@@ -181,7 +195,7 @@ async function chooseLineHandler(req, res) {
     await chooseCandidate({ orderId, lineId, skuCode: candidate.sku_code, actor: "buyer" });
     await advanceIfFullyActioned(orderId);
     const { lines: refreshed } = await getOrder(orderId);
-    res.json({ line: toBuyerLine(refreshed.find((l) => l.id === lineId)) });
+    res.json({ line: toBuyerLine(withLiveStock([refreshed.find((l) => l.id === lineId)])[0]) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "failed to record choice" });
@@ -199,7 +213,7 @@ async function noteLineHandler(req, res) {
     });
     await advanceIfFullyActioned(orderId);
     const { lines } = await getOrder(orderId);
-    res.json({ line: toBuyerLine(lines.find((l) => l.id === lineId)) });
+    res.json({ line: toBuyerLine(withLiveStock([lines.find((l) => l.id === lineId)])[0]) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "failed to save note" });
@@ -302,7 +316,7 @@ async function listAdminOrdersHandler(req, res) {
 async function getAdminOrderHandler(req, res) {
   try {
     const { order, lines } = await getOrder(req.params.id);
-    res.json({ order, lines });
+    res.json({ order, lines: withLiveStock(lines) });
   } catch (err) {
     res.status(404).json({ error: "order not found" });
   }
