@@ -87,6 +87,24 @@ function specContradicts(lineSpec, candidateSpec) {
   return !lineNums.some((n) => candNums.includes(n));
 }
 
+// A "missing" fact (extractor couldn't find a brand/spec) only matters if
+// knowing it would change which SKU ships. If every surviving candidate
+// already agrees on that attribute, the gap is moot — asking a human to
+// supply a fact that can't move the outcome is noise, not rigor.
+const ATTR_GETTERS = {
+  brand: (c) => c.brand,
+  spec: (c) => c.spec,
+};
+function missingIsMoot(candidates, missing) {
+  if (!candidates.length) return false;
+  return missing.every((attr) => {
+    const getter = ATTR_GETTERS[attr];
+    if (!getter) return false; // unknown attribute name — can't prove it's moot
+    const values = new Set(candidates.map((c) => getter(c) ?? null));
+    return values.size === 1;
+  });
+}
+
 export function findCandidates(line, limit = 5) {
   // Fields the extractor was confident about get repeated, so they
   // count twice. Deliberate up-weighting of known facts.
@@ -99,7 +117,8 @@ export function findCandidates(line, limit = 5) {
       sku_code: sku.sku_code,
       label: `${sku.brand} ${sku.product}`,
       score: Number(score(qTokens, tokens).toFixed(3)),
-      spec: sku.spec, // used to filter below, stripped before returning
+      brand: sku.brand, // used to filter/check-moot below, stripped before returning
+      spec: sku.spec,   // used to filter/check-moot below, stripped before returning
     }))
     .sort((a, b) => b.score - a.score);
 
@@ -108,19 +127,22 @@ export function findCandidates(line, limit = 5) {
   // a spec the extractor was confident about, is not a real alternative —
   // it never reaches a human as an option, and never counts toward the
   // ambiguity margin below either.
-  const candidates = ranked
+  const filtered = ranked
     .filter((c) => c.score >= MIN_SCORE)
     .filter((c) => !specContradicts(line.spec, c.spec))
-    .slice(0, limit)
-    .map(({ spec, ...rest }) => rest);
+    .slice(0, limit);
+
+  const candidates = filtered.map(({ brand, spec, ...rest }) => rest);
 
   const [top, second] = candidates;
   let verdict;
 
   if (!top) {
     verdict = "no_match";            // nothing cleared the floor, or everything left contradicted a known spec
-  } else if (line.missing?.length) {
-    verdict = "ambiguous";           // extractor already told us a fact is absent
+  } else if (candidates.length === 1) {
+    verdict = "matched";             // only one real alternative — nothing left to be ambiguous about
+  } else if (line.missing?.length && !missingIsMoot(filtered, line.missing)) {
+    verdict = "ambiguous";           // extractor flagged a gap, and it could still change which SKU ships
   } else if (second && (top.score - second.score) / top.score < AMBIGUITY_MARGIN) {
     verdict = "ambiguous";           // two candidates too close to separate
   } else {

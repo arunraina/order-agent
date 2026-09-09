@@ -218,23 +218,24 @@ function setDecision(i, patch) {
   render();
 }
 
-function actionsFor(i, r, candidate) {
+function actionsFor(i, r, candidate, disableApprove = false) {
   const stock = candidate?.stock;
   const insufficient = stock && stock.status === "insufficient";
   const chosen = decisions[i]?.action;
+  const dis = disableApprove ? "disabled" : "";
   let html = `<div class="actions">`;
 
   if (insufficient) {
     html += `
-      <button class="${chosen === "partial" ? "decided" : ""}" onclick="setDecision(${i}, {action:'partial'})">Partial (${stock.available})</button>
-      <button class="${chosen === "split" ? "decided" : ""}" onclick="setDecision(${i}, {action:'split'})">Split + ETA</button>
+      <button ${dis} class="${chosen === "partial" ? "decided" : ""}" onclick="setDecision(${i}, {action:'partial'})">Partial (${stock.available})</button>
+      <button ${dis} class="${chosen === "split" ? "decided" : ""}" onclick="setDecision(${i}, {action:'split'})">Split + ETA</button>
       ${chosen === "split" ? `<input type="text" placeholder="e.g. 3 days" value="${decisions[i]?.eta ?? ""}" oninput="setDecision(${i}, {eta:this.value})" />` : ""}
-      <button class="${chosen === "approve_full" ? "decided" : ""}" onclick="setDecision(${i}, {action:'approve_full'})">Full anyway</button>
+      <button ${dis} class="${chosen === "approve_full" ? "decided" : ""}" onclick="setDecision(${i}, {action:'approve_full'})">Full anyway</button>
       <button class="${chosen === "skip" ? "decided" : ""}" onclick="setDecision(${i}, {action:'skip'})">Skip</button>
     `;
   } else {
     html += `
-      <button class="${chosen === "approve_full" ? "decided" : ""}" onclick="setDecision(${i}, {action:'approve_full'})">Approve</button>
+      <button ${dis} class="${chosen === "approve_full" ? "decided" : ""}" onclick="setDecision(${i}, {action:'approve_full'})">Approve</button>
       <button class="${chosen === "skip" ? "decided" : ""}" onclick="setDecision(${i}, {action:'skip'})">Skip</button>
     `;
   }
@@ -270,15 +271,21 @@ function render() {
       html += `<div class="cand"><label>${c.label} (score ${c.score}) — ${stockLabel(c.stock)}</label></div>`;
       html += actionsFor(i, r, c);
     } else {
-      // ambiguous — pick a candidate first
-      const idx = d.candidateIndex ?? 0;
+      // ambiguous — pick a candidate first. candidateIndex starts unset so
+      // nothing is pre-selected: an operator must make an explicit choice,
+      // not inherit whichever candidate happened to rank first.
+      const idx = d.candidateIndex;
+      const hasSelection = idx !== null && idx !== undefined;
       r.candidates.forEach((c, ci) => {
         html += `<div class="cand">
           <input type="radio" name="cand${i}" ${ci === idx ? "checked" : ""} onchange="setDecision(${i}, {candidateIndex:${ci}, action:null})" />
           <label>${c.label} (score ${c.score}) — ${stockLabel(c.stock)}</label>
         </div>`;
       });
-      html += actionsFor(i, r, r.candidates[idx]);
+      if (!hasSelection) {
+        html += `<div class="status-line">Select a candidate above before approving.</div>`;
+      }
+      html += actionsFor(i, r, hasSelection ? r.candidates[idx] : undefined, !hasSelection);
     }
     html += `</div>`;
   });
@@ -306,7 +313,7 @@ async function processOrder() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "failed");
     currentResults = data.results;
-    decisions = currentResults.map(() => ({ candidateIndex: 0 }));
+    decisions = currentResults.map(() => ({ candidateIndex: null }));
     let notesHtml = data.notes ? `<p class="notes">${data.notes}</p>` : "";
     if (Object.keys(data.counts || {}).length) {
       notesHtml += `<div class="counts">` + Object.entries(data.counts).map(([k, v]) => `<span class="pill">${k}: ${v}</span>`).join("") + `</div>`;
