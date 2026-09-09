@@ -11,6 +11,215 @@ order only ever becomes a proposal — every line still needs an explicit
 human decision, from the buyer (resolving which product they meant) or the
 operator (approving what actually ships), before anything is final.
 
+---
+
+## How this was built, and why — for interview prep
+
+This section exists so the reasoning survives, not just the code. Everything
+below is true of this exact repo — every file/function named here exists,
+right now, doing what's described.
+
+### The problem, in one sentence
+
+A distributor gets orders as free text from people who don't type SKU codes
+— they type "12mm saria 2 ton tata" — and turning that into a real order
+today means a human manually re-typing it into whatever system holds the
+catalogue. The goal isn't "automate the order" — it's **remove the re-typing
+without removing the human decision**, because the human decision (which
+product, how much stock, is that quantity even right) is the part that
+actually needs judgment.
+
+### Use cases this demonstrates
+
+1. **Free-text intake** — a buyer types however they'd naturally text a
+   distributor (Hinglish, abbreviations, brand-first or spec-first word
+   order), and it still resolves to real catalogue SKUs.
+2. **Governed ambiguity resolution** — when the text genuinely doesn't say
+   enough (no brand, two products score identically), the system asks
+   instead of guessing, and asks the *right* party: the buyer if it's their
+   intent that's unclear, the operator if it's a business call (stock
+   shortfall, which of two visually-identical SKUs to substitute).
+3. **Human-gated fulfilment** — nothing ships, and no inventory moves, until
+   a specific person with a specific role takes a specific action on a
+   specific line. Every one of those four words is enforced in code, not
+   just policy (see Guardrails below).
+4. **External system integration** — the same governed pipeline is
+   reachable by another system (a distributor's own dispatch tool) via a
+   key-gated API, so this can sit behind something else rather than only
+   being a standalone app.
+
+### Build order, and why each step had to come before the next
+
+This is the order the commits actually happened in, because the sequencing
+matters — each layer only makes sense once the one below it exists:
+
+1. **Catalogue first** (`data/sku-master.json`, `src/catalogue.js`). Nothing
+   else can be tested without something to match against. 20 real-shaped
+   SKUs (cement, TMT steel, tiles, sanitaryware, electrical, aggregate),
+   each with brand/spec/uom/hsn/gst_rate — illustrative sample data, but
+   shaped exactly like a real catalogue so the rest of the pipeline isn't
+   solving an easier problem than the real one.
+2. **Deterministic matching before AI extraction** (`src/match.js`). Scoring
+   text against a catalogue is a solved, testable, deterministic problem —
+   build and debug that first, against hand-written fixture lines, before
+   introducing an LLM's non-determinism into the mix. Getting the matcher
+   right first also means the extraction step downstream has a stable
+   target to prove itself against.
+3. **Extraction** (`src/extract.js`) — Claude turns raw text into typed
+   line items (quantity, unit, category, brand, spec). This is the one LLM
+   call in the whole pipeline, deliberately scoped as narrowly as possible:
+   structured extraction, not decision-making.
+4. **Unit reconciliation** (`src/units.js`) — a customer's word ("bora",
+   "ton", "nos") isn't the catalogue's unit of measure; flagged when they
+   don't reconcile, never silently converted.
+5. **Stock and pricing** (`src/stock.js`, `src/pricing.js`) — once matching
+   works, "is it in stock" and "what does it cost" are the next real
+   questions a human needs answered to make a decision.
+6. **The decision layer** (`src/decide.js`) — pure functions describing what
+   an approved/skipped/backordered/manually-noted line *is*, with zero I/O.
+   Built before any UI, so the CLI, the external API, and the operator's
+   confirm handler could all share one answer to "what does an approval
+   look like" instead of three copies drifting apart (see Guardrails).
+7. **CLI first, web UI second** (`src/approve.js`, then `server.js` +
+   `public/`) — proved the human-in-the-loop flow in a terminal (readline
+   prompts) before building a browser UI around the same primitives.
+8. **Persistence** (`src/db.js`, Supabase) — added only once the pipeline
+   itself worked end to end in memory. An order and its decisions need to
+   outlive one browser tab; a `POST` that computes something and returns it
+   doesn't need a database.
+9. **Splitting one shared UI into a buyer view and an operator view**
+   (`src/buyer-view.js`, `views/`) — the original single-page tool let
+   whoever opened it both extract *and* approve, which conflates "the
+   person who wants something" with "the person authorized to commit
+   inventory to them." Splitting these was the point at which
+   passcode-gating (see Guardrails) actually became necessary, not
+   optional.
+10. **Closing real gaps found by using it** — two came from actually
+    exercising the deployed app, not from planning: stock shown to a buyer
+    or operator was a point-in-time snapshot that went stale as other
+    orders moved the same inventory (fixed by recomputing at read time),
+    and approving an order never actually decremented stock at all, so two
+    concurrent approvals against the same low-stock SKU could both succeed
+    (fixed with an atomic, race-safe decrement — see Guardrails). Both are
+    the kind of bug that only shows up once multiple people can touch the
+    same data, which is exactly what step 9 made possible.
+
+### Scoring — how matching actually decides
+
+The core problem: turn "12mm saria 2 ton tata" into a ranked list of real
+SKUs, without an LLM call for every comparison (20 SKUs today, but this has
+to work at 2,000).
+
+- **Tokenize, then weight.** `normalize()` lowercases and splits numbers
+  from letters ("12mm" → "12 mm") so a dimension is never glued to a unit.
+  A numeric token counts for **3x** a word token when scoring — in
+  construction, the number *is* the product (12mm rebar vs 16mm rebar are
+  different SKUs; "TMT bar" alone is not).
+- **Protect compound tokens before the generic split destroys them.**
+  "600x600" and "1.5" would otherwise degrade to bare digits ("600", "5")
+  once "x" and "." are stripped as punctuation — and two different tile
+  sizes, or two different wire gauges, would then score identically.
+  `compoundTokens()` extracts dimension-pairs and decimals as atomic tokens
+  *before* the generic splitter can break them apart.
+- **Strip the quantity before scoring.** "reta 300 cft" — 300 is how much
+  the buyer wants, not a fact about the product. Left in, it competes with
+  a genuine spec digit under the 3x numeric weight, and a coincidental
+  quantity/dimension collision (300 cft landing on a 300x600mm tile) can
+  outrank the actual match. `stripQuantity()` removes it first.
+- **Filter on what's known, rank only on what's unknown.** If the extractor
+  was confident about a spec ("12mm"), any candidate whose own spec
+  contradicts that ("8mm") is filtered out entirely before scoring even
+  starts — `specContradicts()` — so a fact the extractor was sure of can
+  never be silently outranked by word-overlap instead of excluded outright.
+- **Three verdicts, decided by a floor and a margin, not a single
+  threshold:**
+  ```
+  MIN_SCORE = 0.20          // below this: nothing cleared the confidence floor
+  AMBIGUITY_MARGIN = 0.15   // top two scores this close: can't tell them apart
+  ```
+  - `no_match` — nothing cleared `MIN_SCORE`, or everything left contradicted
+    a known spec.
+  - `matched` — exactly one candidate survived, or the top score clearly
+    separates from the runner-up, **and** nothing the extractor flagged as
+    missing (brand/spec) would actually change which SKU ships if it were
+    known (`missingIsMoot()` — see below).
+  - `ambiguous` — otherwise. Sent to a human, never guessed.
+- **A missing fact only matters if it's a fact that would change the
+  outcome.** Early on, the matcher forced `ambiguous` any time the
+  extractor flagged something absent (no brand mentioned), even when only
+  one real candidate existed or every surviving candidate agreed on that
+  exact attribute anyway. `missingIsMoot(candidates, missing)` checks
+  whether the missing attribute actually varies across the survivors —
+  if it doesn't, there's nothing left to ask about, so the verdict is
+  `matched` instead of manufacturing a decision nobody needed to make.
+
+### Guardrails — what actually stops this from doing something wrong
+
+Each of these is a specific mechanism, not a policy statement:
+
+- **Exactly one code path writes anything, ever.** The CLI's approval flow,
+  the external API's confirm handler, and the operator's confirm handler
+  all build their output through the *same* `src/decide.js` primitives
+  (`approvedLine`, `skippedLine`, `backorderedLine`, `manualNoteLine`) —
+  "what does an approved line look like" has one implementation, so it
+  can't drift into three different answers across three surfaces.
+- **The buyer cannot see or influence which SKU gets picked beyond
+  choosing among options the matcher already returned.** Resolving an
+  ambiguous line sends an array *index*, never a `sku_code` — the server
+  looks up the real SKU from that position in the stored candidate list.
+  There is no field a buyer's browser can send that maps directly to a
+  SKU. Enforced in `src/buyer-view.js` and the `/api/orders/:id/lines/*`
+  handlers.
+- **The buyer never sees a score, a `sku_code`, or the raw candidate
+  list** — only a product name and a stock band (`in_stock` / `limited` /
+  `out_of_stock`, never the exact number). One pure transform
+  (`toBuyerLine`/`toBuyerOrder`) is the only place that shape is built, so
+  every route talking to a buyer's browser goes through it rather than
+  each hand-rolling its own "safe" version.
+- **The operator view is gated, and gated in a way that can't be bypassed
+  by knowing a URL.** `/admin/*` pages live in `views/`, not `public/` —
+  Express's static file server can only ever serve `public/`, so there's
+  no direct path to an operator page that skips the passcode check, even
+  if someone guesses the exact filename. Verified directly (see commit
+  history): `/admin-orders.html` and `/views/admin-orders.html` both 404
+  from outside the auth-gated route.
+- **Money and stock rules live in exactly one place.** `src/pricing.js` is
+  the only file that prices a line; `src/stock.js` is the only file that
+  reads or writes a stock number. Nothing downstream recomputes either
+  independently — a lesson taken directly from a real incident in the
+  companion Griffy codebase, where three separate copies of a fee
+  calculation drifted apart and customers were shown one number and
+  billed another.
+- **Approving stock is atomic, not read-then-write.** `decrementStockExact`/
+  `decrementStockUpTo` (`src/stock.js`) do a synchronous read-check-write
+  in one call with no `await` inside it — closing a real race where two
+  concurrent approvals against the same low-stock SKU could otherwise both
+  read the same pre-decrement number and both succeed, overselling it.
+  Guaranteed within a single process; scaling this app to multiple
+  instances would need a real database row lock instead (noted inline in
+  `stock.js`).
+- **Every write to Supabase requires the service_role key; RLS is on with
+  no anon/authenticated policies.** A client using the public key gets
+  nothing from these tables — the server is the only trusted writer, same
+  reasoning as the passcode gate on the browser side.
+- **An append-only audit log, not a mutable status field.** `decisions`
+  gets one row per action, ever — who (`buyer`/`operator`/`system`), what
+  action, what it was based on. Nothing updates or deletes a row here, so
+  "what actually happened to this order" is always reconstructable, not
+  just "what its current status says."
+
+### Integrations — what's real, what's a documented placeholder
+
+| Integration | Status |
+|---|---|
+| Anthropic Claude (extraction) | **Live** — forced tool-use, one call per order |
+| Supabase / Postgres (persistence) | **Live** — dedicated `order_agent` schema |
+| Railway (hosting) | **Live** — auto-deploys on push to `main` |
+| External API (`x-api-key`-gated `/api/v1/*`) | **Live** — same handlers as the original ephemeral flow, for another system to call |
+| Tally XML export/import | **Documented, not built** — no real tenant to test against |
+| SAP Business One Service Layer | **Documented, not built** — same reason |
+| Manual stock entry | **Live** — the one genuinely live catalogue data, editable from the operator's "Manage stock" panel |
+
 ## Setup
 
 ```
