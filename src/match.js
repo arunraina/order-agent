@@ -71,6 +71,22 @@ function stripQuantity(text, quantity) {
   return String(text ?? "").replace(new RegExp(`\\b${escapeRegex(quantity)}\\b`, "g"), " ");
 }
 
+// True when the extracted spec and a candidate's own catalogue spec share
+// no numeric substring — "12mm" vs "8 mm" — so a fact the extractor was
+// confident about can never be silently outranked instead of excluded.
+// Doesn't fire when either side has no digits: a non-dimensional spec
+// ("Pillar Cock") isn't something this check can contradict.
+// Pulled via a direct regex, not tokenize() — tokenize() drops
+// single-character tokens (it's built to discard a stray "x" joiner from
+// "2x2"), which would also silently drop a single-digit spec like "8".
+function specContradicts(lineSpec, candidateSpec) {
+  if (!lineSpec || !candidateSpec) return false;
+  const lineNums = String(lineSpec).match(/\d+/g) ?? [];
+  const candNums = String(candidateSpec).match(/\d+/g) ?? [];
+  if (!lineNums.length || !candNums.length) return false;
+  return !lineNums.some((n) => candNums.includes(n));
+}
+
 export function findCandidates(line, limit = 5) {
   // Fields the extractor was confident about get repeated, so they
   // count twice. Deliberate up-weighting of known facts.
@@ -83,15 +99,26 @@ export function findCandidates(line, limit = 5) {
       sku_code: sku.sku_code,
       label: `${sku.brand} ${sku.product}`,
       score: Number(score(qTokens, tokens).toFixed(3)),
+      spec: sku.spec, // used to filter below, stripped before returning
     }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .sort((a, b) => b.score - a.score);
 
-  const [top, second] = ranked;
+  // Filter on facts that were extracted; rank only on what's unknown.
+  // A candidate below the confidence floor, or whose own spec contradicts
+  // a spec the extractor was confident about, is not a real alternative —
+  // it never reaches a human as an option, and never counts toward the
+  // ambiguity margin below either.
+  const candidates = ranked
+    .filter((c) => c.score >= MIN_SCORE)
+    .filter((c) => !specContradicts(line.spec, c.spec))
+    .slice(0, limit)
+    .map(({ spec, ...rest }) => rest);
+
+  const [top, second] = candidates;
   let verdict;
 
-  if (!top || top.score < MIN_SCORE) {
-    verdict = "no_match";
+  if (!top) {
+    verdict = "no_match";            // nothing cleared the floor, or everything left contradicted a known spec
   } else if (line.missing?.length) {
     verdict = "ambiguous";           // extractor already told us a fact is absent
   } else if (second && (top.score - second.score) / top.score < AMBIGUITY_MARGIN) {
@@ -100,16 +127,7 @@ export function findCandidates(line, limit = 5) {
     verdict = "matched";
   }
 
-  // Verdict above is decided from the full ranked list on purpose — a
-  // zero-score runner-up can never trip the ambiguity margin anyway
-  // (0 - top gives a ratio of 1, well past AMBIGUITY_MARGIN), so this
-  // filter only changes what a human sees, never what triggers review.
-  // Padding to `limit` with SKUs that share zero tokens with the query
-  // is noise, not a real alternative — a reviewer shouldn't have to
-  // scan past four irrelevant cement rows to find the one real pick.
-  const candidates = ranked.filter((c) => c.score > 0);
-
-  return { raw_text: line.raw_text, verdict, candidates: candidates.length ? candidates : ranked.slice(0, 1) };
+  return { raw_text: line.raw_text, verdict, candidates };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
