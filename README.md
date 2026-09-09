@@ -42,7 +42,7 @@ node src/approve.js 0    # full pipeline with interactive approval prompts
 ## How it works — the layers
 
 ```
-data/sku-master.json  →  the catalogue (SKU, brand, spec, uom, hsn, gst_rate, stock_qty, aliases)
+data/sku-master.json  →  the catalogue (SKU, brand, spec, uom, hsn, gst_rate, unit_price, aliases)
 
 src/catalogue.js   Layer 1 — loads the catalogue, exposes searchableText()
 src/extract.js     Layer 3 — Claude call, forced tool-use JSON, turns raw text
@@ -51,15 +51,53 @@ src/match.js       Layer 2 — token-weighted matcher, scores each line's text
                     against every SKU, returns matched / ambiguous / no_match
 src/units.js       reconciles the customer's word ("bora", "ton", "nos") against
                     the catalogue's own unit of measure
-src/stock.js       checks requested quantity against stock_qty — in_stock /
-                    insufficient / out_of_stock
+src/stock.js       the only genuinely live data source — checks requested
+                    quantity against a manually-set stock number
+                    (data/stock-overrides.json, gitignored), falling back to
+                    the catalogue's baseline stock_qty when nothing's been set
+src/pricing.js     prices approved/backordered lines from unit_price + gst_rate,
+                    rolls up "payable now" vs. "pending on backorder"
+src/roi.js         a sizing model (minutes saved × order volume) — assumptions
+                    you'd validate with real timing data, not a measured result
 src/decide.js       pure decision primitives (approvedLine, skippedLine,
                     backorderedLine) — shared by both the CLI and the web UI,
                     so "what does an approved line look like" has one answer
 src/run.js         orchestrates extract → match → verdict counts
-src/approve.js      CLI: walks a human through every line, writes the draft
-server.js + public/  web UI: same decisions, browser-driven instead of stdin
+src/approve.js      CLI: walks a human through every line, writes the priced draft
+server.js + public/  web UI: same decisions, browser-driven instead of stdin —
+                    plus a "Manage stock" panel and a key-gated /api/v1/*
+                    surface for external callers
 ```
+
+## External API
+
+Same handlers as the browser UI, reachable by another system (a distributor's
+own dispatch tool, a future ERP adapter), gated by an `x-api-key` header:
+
+```
+GET  /api/v1/health
+GET  /api/v1/catalogue
+GET  /api/v1/stock
+POST /api/v1/stock      { sku_code, qty }
+POST /api/v1/process    { orderText }
+POST /api/v1/confirm    { orderText, results, decisions }
+```
+
+Set `ORDER_AGENT_API_KEY` in `.env` — without it, the server logs a dev
+fallback key at startup (fine for local testing, not for a public deployment).
+
+## Live stock
+
+`/api/v1/stock` and the in-app "Manage stock" panel are the one genuinely
+live thing here — everything else (price, HSN, GST rate) stays static sample
+data. This is the "Manual" tier from the companion Griffy Supply case study:
+a distributor sets their own number, no external system involved. Writes go
+to `data/stock-overrides.json` (gitignored — it's runtime state, not a
+fixture) and take effect immediately, overriding the catalogue's baseline.
+
+Tally and SAP Business One integration are documented as the "Lite" and
+"Connected" tiers in that same case study but aren't implemented here — no
+real tenant to build and test against yet.
 
 ## Why every line still needs a human
 

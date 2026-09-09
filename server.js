@@ -5,7 +5,7 @@ import { dirname, join } from "path";
 import { writeFileSync, mkdirSync } from "fs";
 import { processOrder } from "./src/run.js";
 import { catalogue } from "./src/catalogue.js";
-import { checkStock } from "./src/stock.js";
+import { checkStock, listStock, setStock } from "./src/stock.js";
 import { approvedLine, skippedLine, backorderedLine, manualNoteLine } from "./src/decide.js";
 import { priceOrder } from "./src/pricing.js";
 
@@ -100,10 +100,32 @@ function confirmHandler(req, res) {
   res.json({ draft, file: outPath });
 }
 
+// Stock management: the "Manual" tier from the Griffy Supply design — a
+// distributor sets their own number, no external system involved. This is
+// the only genuinely live data in the whole catalogue; everything else
+// (price, hsn, gst_rate) is still static sample data.
+function stockListHandler(req, res) {
+  res.json({ skus: listStock() });
+}
+function stockSetHandler(req, res) {
+  const { sku_code, qty } = req.body ?? {};
+  if (!sku_code || typeof qty !== "number" || qty < 0) {
+    return res.status(400).json({ error: "sku_code (string) and qty (number >= 0) are required" });
+  }
+  try {
+    const updated = setStock(sku_code, qty, req.get("x-api-key") ? "external_api" : "web_ui");
+    res.json({ sku_code, ...updated });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+}
+
 // The browser UI (public/index.html) hits these directly, same-origin, no
 // key — this is the local demo path.
 app.post("/api/process", processHandler);
 app.post("/api/confirm", confirmHandler);
+app.get("/api/stock", stockListHandler);
+app.post("/api/stock", stockSetHandler);
 
 // External systems (another company's dispatch tool, a future SAP/Tally
 // adapter) hit the versioned, key-gated path instead. Same handlers, same
@@ -130,6 +152,8 @@ app.get("/api/v1/catalogue", requireApiKey, (req, res) => {
 
 app.post("/api/v1/process", requireApiKey, processHandler);
 app.post("/api/v1/confirm", requireApiKey, confirmHandler);
+app.get("/api/v1/stock", requireApiKey, stockListHandler);
+app.post("/api/v1/stock", requireApiKey, stockSetHandler);
 
 const PORT = process.env.PORT || 3500;
 app.listen(PORT, () => {

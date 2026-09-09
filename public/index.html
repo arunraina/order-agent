@@ -90,7 +90,20 @@
       <h1>PO Intake Agent</h1>
       <p class="sub" style="margin-bottom:0;">Paste a distributor's unstructured order. Every line still needs a human decision below — nothing is written until you confirm.</p>
     </div>
-    <button class="ghost small" id="apiToggle" type="button">⚙ API access</button>
+    <div style="display:flex; gap:8px;">
+      <button class="ghost small" id="stockToggle" type="button">📦 Manage stock</button>
+      <button class="ghost small" id="apiToggle" type="button">⚙ API access</button>
+    </div>
+  </div>
+
+  <div class="card api-panel" id="stockPanel">
+    <div class="section-label">Live Stock (Manual Tier)</div>
+    <p class="sub" style="margin-bottom:12px;">
+      The only genuinely live data in this catalogue — everything else (price, HSN, GST) is static sample
+      data. Editing a value here writes to <code>data/stock-overrides.json</code> immediately and every
+      match/approval check reflects it right away.
+    </p>
+    <div id="stockTable"></div>
   </div>
 
   <div class="card api-panel" id="apiPanel">
@@ -101,6 +114,8 @@
     </p>
     <div class="endpoint"><span class="method">GET</span>&nbsp; /api/v1/health</div>
     <div class="endpoint"><span class="method">GET</span>&nbsp; /api/v1/catalogue</div>
+    <div class="endpoint"><span class="method">GET</span>&nbsp; /api/v1/stock</div>
+    <div class="endpoint"><span class="method">POST</span> /api/v1/stock &nbsp;<span style="color:var(--faint)">{ sku_code, qty }</span></div>
     <div class="endpoint"><span class="method">POST</span> /api/v1/process &nbsp;<span style="color:var(--faint)">{ orderText }</span></div>
     <div class="endpoint"><span class="method">POST</span> /api/v1/confirm &nbsp;<span style="color:var(--faint)">{ orderText, results, decisions }</span></div>
     <p class="sub" style="margin:12px 0 4px;">Example:</p>
@@ -136,6 +151,51 @@ const SAMPLES = [
 document.getElementById("apiToggle").addEventListener("click", () => {
   document.getElementById("apiPanel").classList.toggle("open");
 });
+
+document.getElementById("stockToggle").addEventListener("click", async () => {
+  const panel = document.getElementById("stockPanel");
+  panel.classList.toggle("open");
+  if (panel.classList.contains("open")) await loadStock();
+});
+
+async function loadStock() {
+  const table = document.getElementById("stockTable");
+  table.innerHTML = `<p class="sub">Loading…</p>`;
+  const res = await fetch("/api/stock");
+  const data = await res.json();
+  table.innerHTML = data.skus.map((s) => `
+    <div class="cand" data-sku="${s.sku_code}">
+      <label style="flex:2;">
+        ${s.label}
+        <span style="color:var(--faint); font-size:0.75rem;"> (${s.sku_code}, ${s.uom})</span>
+        ${s.source === "manual_override" ? `<span style="color:var(--accent); font-size:0.6875rem; font-weight:700;"> · manually set</span>` : ""}
+      </label>
+      <input type="text" inputmode="decimal" value="${s.qty ?? ""}" style="width:80px; background:var(--bg); border:1px solid var(--border); border-radius:0.5rem; padding:5px 8px; font:inherit;" />
+      <button class="small" onclick="saveStock('${s.sku_code}', this)">Save</button>
+    </div>
+  `).join("");
+}
+
+window.saveStock = async function (skuCode, btn) {
+  const row = btn.closest(".cand");
+  const input = row.querySelector("input");
+  const qty = Number(input.value);
+  if (!Number.isFinite(qty) || qty < 0) { input.style.borderColor = "var(--bad-text, red)"; return; }
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const res = await fetch("/api/stock", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sku_code: skuCode, qty }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error);
+    await loadStock();
+  } catch (err) {
+    alert("Failed to save: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "Save";
+  }
+};
 
 document.querySelectorAll("[data-sample]").forEach((b) =>
   b.addEventListener("click", () => {
