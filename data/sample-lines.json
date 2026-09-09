@@ -1,0 +1,8 @@
+[
+  { "raw_text": "ambuja opc 43 ke 150 bora", "quantity": 150, "unit": "bora", "category": "Cement", "brand": "Ambuja", "spec": "43 Grade", "missing": [] },
+  { "raw_text": "12mm saria 2 ton tata", "quantity": 2, "unit": "ton", "category": "TMT Steel", "brand": "Tata Tiscon", "spec": "12 mm", "missing": [] },
+  { "raw_text": "100 bags cement extra", "quantity": 100, "unit": "bags", "category": "Cement", "brand": null, "spec": null, "missing": ["brand", "spec"] },
+  { "raw_text": "12mm saria 3 ton", "quantity": 3, "unit": "ton", "category": "TMT Steel", "brand": null, "spec": "12 mm", "missing": ["brand"] },
+  { "raw_text": "jaguar tap 6 piece", "quantity": 6, "unit": "piece", "category": "Sanitary Ware", "brand": "Jaquar", "spec": null, "missing": [] },
+  { "raw_text": "20mm gitti 500 cft", "quantity": 500, "unit": "cft", "category": "Aggregate", "brand": null, "spec": "20 mm", "missing": [] }
+]
