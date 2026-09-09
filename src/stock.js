@@ -44,6 +44,46 @@ export function setStock(skuCode, qty, updatedBy = "manual") {
   return overrides[skuCode];
 }
 
+// The confirm handler's write path — decrementing stock is a real
+// fulfilment, not a distributor retyping a number. Both variants read,
+// compute, and save in one synchronous call with no `await` inside it, so
+// within a single Node process nothing else can run between the read and
+// the write: the classic check-then-act race (two concurrent approvals
+// both reading "10 available" and both proceeding) is closed by never
+// yielding the event loop mid-operation. This guarantee is per-process —
+// scaling this app to more than one instance would need a real database
+// row lock (e.g. `UPDATE ... SET qty = qty - x WHERE qty >= x`) instead.
+
+// All-or-nothing: decrements exactly `qty` if at least that much is
+// available, otherwise writes nothing. For "approve full" — the operator
+// asked for the whole quantity, so getting less than that is a stock
+// conflict to report, not something to silently downgrade into a partial
+// fulfilment they never chose.
+export function decrementStockExact(skuCode, qty) {
+  if (!skuByCode.has(skuCode)) throw new Error(`Unknown SKU: ${skuCode}`);
+  const overrides = loadOverrides();
+  const current = effectiveStockQty(skuCode);
+  if (current == null || current < qty) {
+    return { ok: false, available: current };
+  }
+  overrides[skuCode] = { qty: current - qty, updated_at: new Date().toISOString(), updated_by: "order_fulfilment" };
+  saveOverrides(overrides);
+  return { ok: true, available: current - qty };
+}
+
+// Best-effort: takes whatever is available up to `qty` and reports how
+// much that was. For "partial" and the immediate portion of "split" —
+// both already mean "give me what you've got right now".
+export function decrementStockUpTo(skuCode, qty) {
+  if (!skuByCode.has(skuCode)) throw new Error(`Unknown SKU: ${skuCode}`);
+  const overrides = loadOverrides();
+  const current = effectiveStockQty(skuCode) ?? 0;
+  const taken = Math.max(0, Math.min(current, qty));
+  overrides[skuCode] = { qty: current - taken, updated_at: new Date().toISOString(), updated_by: "order_fulfilment" };
+  saveOverrides(overrides);
+  return { taken, remaining: current - taken };
+}
+
 export function listStock() {
   const overrides = loadOverrides();
   return catalogue.map((sku) => ({

@@ -5,7 +5,7 @@ import { dirname, join } from "path";
 import { writeFileSync, mkdirSync } from "fs";
 import { processOrder } from "./src/run.js";
 import { catalogue } from "./src/catalogue.js";
-import { checkStock, listStock, setStock } from "./src/stock.js";
+import { checkStock, listStock, setStock, decrementStockExact, decrementStockUpTo } from "./src/stock.js";
 import { approvedLine, skippedLine, backorderedLine, manualNoteLine } from "./src/decide.js";
 import { priceOrder } from "./src/pricing.js";
 import {
@@ -385,28 +385,43 @@ async function confirmAdminOrderHandler(req, res) {
       const reason = line.verdict === "ambiguous" ? "human-resolved ambiguity" : "auto-matched, human-approved";
 
       if (d.action === "approve_full") {
+        // All-or-nothing, atomically decremented right now — not the
+        // stock number the operator saw when the page loaded. If someone
+        // else's confirm already took it in between, that's a real
+        // conflict to report, not something to wave through.
+        const fulfil = decrementStockExact(candidate.sku_code, line.quantity);
+        if (!fulfil.ok) {
+          await recordLineDecision({
+            orderId, lineId: line.id, actor: "operator", action: "skip",
+            payload: { reason: "stock changed before confirm", requested: line.quantity, available: fulfil.available },
+            statusPatch: { status: "skipped" },
+          });
+          priceableLines.push(skippedLine(r, `stock changed before confirm — only ${fulfil.available ?? 0} available now`));
+          continue;
+        }
         await recordLineDecision({
           orderId, lineId: line.id, actor: "operator", action: "approve_full",
-          payload: { sku_code: candidate.sku_code }, statusPatch: { status: "approved" },
+          payload: { sku_code: candidate.sku_code, fulfilled_qty: line.quantity }, statusPatch: { status: "approved" },
         });
         priceableLines.push(approvedLine(r, candidate, reason));
       } else if (d.action === "partial") {
-        const stock = checkStock(candidate.sku_code, line.quantity);
+        const { taken } = decrementStockUpTo(candidate.sku_code, line.quantity);
         await recordLineDecision({
           orderId, lineId: line.id, actor: "operator", action: "partial",
-          payload: { sku_code: candidate.sku_code, fulfilled_qty: stock.available },
+          payload: { sku_code: candidate.sku_code, fulfilled_qty: taken },
           statusPatch: { status: "partial" },
         });
-        priceableLines.push(approvedLine({ ...r, quantity: stock.available }, candidate, "partial fulfilment — remainder dropped", line.quantity));
+        priceableLines.push(approvedLine({ ...r, quantity: taken }, candidate, "partial fulfilment — remainder dropped", line.quantity));
       } else if (d.action === "split") {
-        const stock = checkStock(candidate.sku_code, line.quantity);
+        const { taken } = decrementStockUpTo(candidate.sku_code, line.quantity);
+        const shortBy = line.quantity - taken;
         await recordLineDecision({
           orderId, lineId: line.id, actor: "operator", action: "split",
-          payload: { sku_code: candidate.sku_code, fulfilled_qty: stock.available, backordered_qty: stock.short_by, eta: d.eta || null },
+          payload: { sku_code: candidate.sku_code, fulfilled_qty: taken, backordered_qty: shortBy, eta: d.eta || null },
           statusPatch: { status: "split" },
         });
-        priceableLines.push(approvedLine({ ...r, quantity: stock.available }, candidate, "split fulfilment — immediate portion", line.quantity));
-        priceableLines.push(backorderedLine(r, candidate, stock.short_by, line.quantity, d.eta));
+        priceableLines.push(approvedLine({ ...r, quantity: taken }, candidate, "split fulfilment — immediate portion", line.quantity));
+        priceableLines.push(backorderedLine(r, candidate, shortBy, line.quantity, d.eta));
       }
     }
 
