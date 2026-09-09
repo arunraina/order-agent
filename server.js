@@ -8,6 +8,14 @@ import { catalogue } from "./src/catalogue.js";
 import { checkStock, listStock, setStock } from "./src/stock.js";
 import { approvedLine, skippedLine, backorderedLine, manualNoteLine } from "./src/decide.js";
 import { priceOrder } from "./src/pricing.js";
+import {
+  createOrder,
+  getOrder,
+  chooseCandidate,
+  recordLineDecision,
+  setOrderStatus,
+} from "./src/db.js";
+import { toBuyerLine, toBuyerOrder } from "./src/buyer-view.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -100,6 +108,94 @@ function confirmHandler(req, res) {
   res.json({ draft, file: outPath });
 }
 
+// Buyer-facing order flow (public/index.html + public/order.html). Unlike
+// processHandler above, this path persists — a buyer's order and every
+// decision made on it needs to survive past the browser tab, since the
+// operator reviews it later and the buyer comes back to check on it.
+// toBuyerLine/toBuyerOrder (src/buyer-view.js) are what keep this route
+// buyer-safe: no score, no sku_code, no raw candidate list.
+
+// Once nothing is left "pending" (every line auto-matched, or the buyer
+// has picked a candidate or left a note for every ambiguous/no_match one),
+// the order moves from "submitted" to "in_review" — there's nothing more
+// for the buyer to do, it's the operator's turn.
+async function advanceIfFullyActioned(orderId) {
+  const { order, lines } = await getOrder(orderId);
+  if (order.status === "submitted" && !lines.some((l) => l.status === "pending")) {
+    await setOrderStatus({ orderId, status: "in_review" });
+  }
+}
+
+async function createOrderRecordHandler(req, res) {
+  const { buyerName, buyerPhone, orderText } = req.body ?? {};
+  const text = (orderText ?? "").trim();
+  if (!text) return res.status(400).json({ error: "orderText is required" });
+
+  try {
+    const { notes, counts, results } = await processOrder(text);
+    if (!results.length) {
+      return res.json({ orderId: null, notes, counts });
+    }
+    const withStock = results.map((r) => ({
+      ...r,
+      candidates: r.candidates.map((c) => ({ ...c, stock: checkStock(c.sku_code, r.quantity) })),
+    }));
+    const { order } = await createOrder({ orderText: text, buyerName, buyerPhone, results: withStock });
+    await advanceIfFullyActioned(order.id);
+    res.json({ orderId: order.id, notes, counts });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err instanceof Error ? err.message : "failed to create order" });
+  }
+}
+
+async function getOrderRecordHandler(req, res) {
+  try {
+    const { order, lines } = await getOrder(req.params.id);
+    res.json({ order: toBuyerOrder(order), lines: lines.map(toBuyerLine) });
+  } catch (err) {
+    res.status(404).json({ error: "order not found" });
+  }
+}
+
+async function chooseLineHandler(req, res) {
+  const { id: orderId, lineId } = req.params;
+  const { optionIndex } = req.body ?? {};
+  try {
+    const { lines } = await getOrder(orderId);
+    const line = lines.find((l) => l.id === lineId);
+    if (!line) return res.status(404).json({ error: "line not found" });
+    const candidate = line.candidates?.[optionIndex];
+    if (!candidate) return res.status(400).json({ error: "invalid option" });
+
+    await chooseCandidate({ orderId, lineId, skuCode: candidate.sku_code, actor: "buyer" });
+    await advanceIfFullyActioned(orderId);
+    const { lines: refreshed } = await getOrder(orderId);
+    res.json({ line: toBuyerLine(refreshed.find((l) => l.id === lineId)) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "failed to record choice" });
+  }
+}
+
+async function noteLineHandler(req, res) {
+  const { id: orderId, lineId } = req.params;
+  const note = (req.body?.note ?? "").trim();
+  if (!note) return res.status(400).json({ error: "note is required" });
+  try {
+    await recordLineDecision({
+      orderId, lineId, actor: "buyer", action: "manual_note",
+      payload: { note }, statusPatch: { status: "manual_note", note },
+    });
+    await advanceIfFullyActioned(orderId);
+    const { lines } = await getOrder(orderId);
+    res.json({ line: toBuyerLine(lines.find((l) => l.id === lineId)) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "failed to save note" });
+  }
+}
+
 // Stock management: the "Manual" tier from the Griffy Supply design — a
 // distributor sets their own number, no external system involved. This is
 // the only genuinely live data in the whole catalogue; everything else
@@ -126,6 +222,15 @@ app.post("/api/process", processHandler);
 app.post("/api/confirm", confirmHandler);
 app.get("/api/stock", stockListHandler);
 app.post("/api/stock", stockSetHandler);
+
+// Buyer flow: submit an order, then track it. public/order.html reads the
+// order id out of the URL itself, so /orders/:id always serves the same
+// static page — the persisted state, not the URL, decides what it shows.
+app.post("/api/orders", createOrderRecordHandler);
+app.get("/api/orders/:id", getOrderRecordHandler);
+app.post("/api/orders/:id/lines/:lineId/choose", chooseLineHandler);
+app.post("/api/orders/:id/lines/:lineId/note", noteLineHandler);
+app.get("/orders/:id", (req, res) => res.sendFile(join(__dirname, "public", "order.html")));
 
 // External systems (another company's dispatch tool, a future SAP/Tally
 // adapter) hit the versioned, key-gated path instead. Same handlers, same
