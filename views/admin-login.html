@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>order-agent — operator login</title>
+<style>
+  :root {
+    --bg: #FDF8F5; --card: #ffffff; --border: #EBE0D8;
+    --text: #2C1810; --muted: #6B5248; --faint: #A08070;
+    --accent: #C0593A; --bad-bg: #fee2e2; --bad-text: #991b1b; --bad-border: #fecaca;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 1rem;
+    box-shadow: 0 1px 2px rgba(44,24,16,.04); padding: 28px; width: 100%; max-width: 340px; }
+  .brand { color: var(--accent); font-weight: 800; font-size: 1.0625rem; margin-bottom: 2px; }
+  .tag { color: var(--faint); font-size: 0.625rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .08em; margin-bottom: 18px; }
+  label { display: block; font-size: 0.75rem; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+  input[type=password] { width: 100%; border: 1px solid var(--border); border-radius: 0.75rem;
+    padding: 11px 12px; font: inherit; background: #fff; color: var(--text); }
+  input[type=password]:focus { outline: none; border-color: var(--accent); }
+  button { width: 100%; margin-top: 16px; font: inherit; cursor: pointer; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; border-radius: 0.75rem; padding: 11px; font-weight: 600; }
+  button:hover { background: #a84d31; }
+  .error { background: var(--bad-bg); border: 1px solid var(--bad-border); color: var(--bad-text);
+    padding: 10px 14px; border-radius: 0.625rem; margin-bottom: 16px; font-size: 0.8125rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand">Order Agent</div>
+  <div class="tag">Operator login</div>
+  <div class="error" id="err" style="display:none;">Incorrect passcode.</div>
+  <form method="POST" action="/admin/login">
+    <label for="passcode">Passcode</label>
+    <input type="password" id="passcode" name="passcode" autofocus />
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+<script>
+  if (new URLSearchParams(window.location.search).get("error")) {
+    document.getElementById("err").style.display = "block";
+  }
+</script>
+</body>
+</html>

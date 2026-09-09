@@ -11,9 +11,11 @@ import { priceOrder } from "./src/pricing.js";
 import {
   createOrder,
   getOrder,
+  listOrdersWithLineCounts,
   chooseCandidate,
   recordLineDecision,
   setOrderStatus,
+  deriveOrderStatus,
 } from "./src/db.js";
 import { toBuyerLine, toBuyerOrder } from "./src/buyer-view.js";
 
@@ -21,8 +23,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // the /admin/login form posts this way
 app.use(express.static(join(__dirname, "public")));
 
+// The original ephemeral flow: paste text in, get a priced draft back,
+// nothing persisted anywhere but a local JSON file. Once the buyer and
+// operator views below shipped, nothing in the browser calls these two
+// handlers any more — they're kept as the implementation behind
+// /api/v1/process + /api/v1/confirm, the external-system integration path
+// documented in the README, which has no reason to move to Supabase.
+//
 // Runs the read-only part of the pipeline (extract -> match) and returns
 // every candidate's stock position alongside it — nothing here writes
 // anything, browser or external caller alike.
@@ -199,7 +209,9 @@ async function noteLineHandler(req, res) {
 // Stock management: the "Manual" tier from the Griffy Supply design — a
 // distributor sets their own number, no external system involved. This is
 // the only genuinely live data in the whole catalogue; everything else
-// (price, hsn, gst_rate) is still static sample data.
+// (price, hsn, gst_rate) is still static sample data. Reused by both the
+// key-gated external API and the passcode-gated /api/admin/stock — same
+// handlers, same "who's allowed to write" question, two different callers.
 function stockListHandler(req, res) {
   res.json({ skus: listStock() });
 }
@@ -209,19 +221,12 @@ function stockSetHandler(req, res) {
     return res.status(400).json({ error: "sku_code (string) and qty (number >= 0) are required" });
   }
   try {
-    const updated = setStock(sku_code, qty, req.get("x-api-key") ? "external_api" : "web_ui");
+    const updated = setStock(sku_code, qty, req.get("x-api-key") ? "external_api" : "operator_ui");
     res.json({ sku_code, ...updated });
   } catch (err) {
     res.status(404).json({ error: err.message });
   }
 }
-
-// The browser UI (public/index.html) hits these directly, same-origin, no
-// key — this is the local demo path.
-app.post("/api/process", processHandler);
-app.post("/api/confirm", confirmHandler);
-app.get("/api/stock", stockListHandler);
-app.post("/api/stock", stockSetHandler);
 
 // Buyer flow: submit an order, then track it. public/order.html reads the
 // order id out of the URL itself, so /orders/:id always serves the same
@@ -231,6 +236,182 @@ app.get("/api/orders/:id", getOrderRecordHandler);
 app.post("/api/orders/:id/lines/:lineId/choose", chooseLineHandler);
 app.post("/api/orders/:id/lines/:lineId/note", noteLineHandler);
 app.get("/orders/:id", (req, res) => res.sendFile(join(__dirname, "public", "order.html")));
+
+// Operator view. Gated by one shared passcode from an env var — not a real
+// auth system, deliberately: there's one operator role, not per-user
+// accounts, so a session token would be modeling users this app doesn't
+// have. The cookie holds the passcode itself (httpOnly, so page JS can't
+// read it); every request just compares it to the configured value. The
+// pages this gate protects live in views/, not public/, specifically so
+// express.static can't serve them straight past the check — a file under
+// public/ is reachable by anyone who knows its path regardless of any
+// route guard added elsewhere.
+const ADMIN_PASSCODE = process.env.ADMIN_PASSCODE || "admin-local-dev";
+if (!process.env.ADMIN_PASSCODE) {
+  console.log(`No ADMIN_PASSCODE set in .env — operator login is using the default dev passcode: ${ADMIN_PASSCODE}`);
+}
+const ADMIN_COOKIE = "order_agent_admin";
+const VIEWS_DIR = join(__dirname, "views");
+
+function parseCookies(header) {
+  const out = {};
+  (header || "").split(";").forEach((pair) => {
+    const i = pair.indexOf("=");
+    if (i === -1) return;
+    out[pair.slice(0, i).trim()] = decodeURIComponent(pair.slice(i + 1).trim());
+  });
+  return out;
+}
+function isAdminAuthed(req) {
+  return parseCookies(req.headers.cookie)[ADMIN_COOKIE] === ADMIN_PASSCODE;
+}
+function requireAdminPage(req, res, next) {
+  if (isAdminAuthed(req)) return next();
+  res.sendFile(join(VIEWS_DIR, "admin-login.html"));
+}
+function requireAdminApi(req, res, next) {
+  if (isAdminAuthed(req)) return next();
+  res.status(401).json({ error: "not authenticated" });
+}
+
+app.post("/admin/login", (req, res) => {
+  const passcode = (req.body?.passcode ?? "").trim();
+  if (passcode !== ADMIN_PASSCODE) return res.redirect("/admin?error=1");
+  res.cookie(ADMIN_COOKIE, ADMIN_PASSCODE, { httpOnly: true, sameSite: "lax", maxAge: 1000 * 60 * 60 * 12 });
+  res.redirect("/admin");
+});
+app.post("/admin/logout", (req, res) => {
+  res.clearCookie(ADMIN_COOKIE);
+  res.redirect("/admin");
+});
+app.get("/admin", requireAdminPage, (req, res) => res.sendFile(join(VIEWS_DIR, "admin-orders.html")));
+app.get("/admin/orders/:id", requireAdminPage, (req, res) => res.sendFile(join(VIEWS_DIR, "admin-order.html")));
+
+async function listAdminOrdersHandler(req, res) {
+  try {
+    res.json({ orders: await listOrdersWithLineCounts() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "failed to list orders" });
+  }
+}
+
+// Unlike the buyer's GET /api/orders/:id, this is the raw, full shape —
+// scores, sku_code, exact stock numbers, everything findCandidates()
+// returned. The operator is exactly who this data is for.
+async function getAdminOrderHandler(req, res) {
+  try {
+    const { order, lines } = await getOrder(req.params.id);
+    res.json({ order, lines });
+  } catch (err) {
+    res.status(404).json({ error: "order not found" });
+  }
+}
+
+// The operator's confirm — same decision shapes the old ephemeral
+// confirmHandler took (approve_full / partial / split / skip / manual_note
+// per line), except each one now writes an audit row via recordLineDecision
+// instead of only ending up in a JSON draft, and a line missing a chosen
+// candidate can still get one here: an ambiguous line the buyer left
+// unresolved is exactly as answerable by the operator as by the buyer,
+// same chooseCandidate() call, actor "operator" instead of "buyer".
+async function confirmAdminOrderHandler(req, res) {
+  const orderId = req.params.id;
+  const { decisions } = req.body ?? {};
+  if (!Array.isArray(decisions)) {
+    return res.status(400).json({ error: "decisions array is required" });
+  }
+
+  try {
+    const { lines } = await getOrder(orderId);
+    const priceableLines = [];
+
+    for (const d of decisions) {
+      const line = lines.find((l) => l.id === d.lineId);
+      if (!line) continue;
+      const r = { raw_text: line.raw_text, quantity: line.quantity, unit: line.unit };
+
+      if (d.action === "manual_note") {
+        const note = (d.note || "").trim();
+        await recordLineDecision({
+          orderId, lineId: line.id, actor: "operator", action: "manual_note",
+          payload: { note }, statusPatch: { status: "manual_note", note },
+        });
+        priceableLines.push(manualNoteLine(r, note));
+        continue;
+      }
+
+      if (d.action !== "approve_full" && d.action !== "partial" && d.action !== "split") {
+        await recordLineDecision({
+          orderId, lineId: line.id, actor: "operator", action: "skip",
+          payload: {}, statusPatch: { status: "skipped" },
+        });
+        priceableLines.push(skippedLine(r, "skipped by reviewer"));
+        continue;
+      }
+
+      let candidate = line.chosen_sku_code
+        ? line.candidates.find((c) => c.sku_code === line.chosen_sku_code)
+        : null;
+      if (!candidate && d.candidateIndex != null) {
+        candidate = line.candidates?.[d.candidateIndex] ?? null;
+        if (candidate) {
+          await chooseCandidate({ orderId, lineId: line.id, skuCode: candidate.sku_code, actor: "operator" });
+        }
+      }
+      if (!candidate) {
+        await recordLineDecision({
+          orderId, lineId: line.id, actor: "operator", action: "skip",
+          payload: { reason: "no candidate selected" }, statusPatch: { status: "skipped" },
+        });
+        priceableLines.push(skippedLine(r, "no candidate selected"));
+        continue;
+      }
+
+      const reason = line.verdict === "ambiguous" ? "human-resolved ambiguity" : "auto-matched, human-approved";
+
+      if (d.action === "approve_full") {
+        await recordLineDecision({
+          orderId, lineId: line.id, actor: "operator", action: "approve_full",
+          payload: { sku_code: candidate.sku_code }, statusPatch: { status: "approved" },
+        });
+        priceableLines.push(approvedLine(r, candidate, reason));
+      } else if (d.action === "partial") {
+        const stock = checkStock(candidate.sku_code, line.quantity);
+        await recordLineDecision({
+          orderId, lineId: line.id, actor: "operator", action: "partial",
+          payload: { sku_code: candidate.sku_code, fulfilled_qty: stock.available },
+          statusPatch: { status: "partial" },
+        });
+        priceableLines.push(approvedLine({ ...r, quantity: stock.available }, candidate, "partial fulfilment — remainder dropped", line.quantity));
+      } else if (d.action === "split") {
+        const stock = checkStock(candidate.sku_code, line.quantity);
+        await recordLineDecision({
+          orderId, lineId: line.id, actor: "operator", action: "split",
+          payload: { sku_code: candidate.sku_code, fulfilled_qty: stock.available, backordered_qty: stock.short_by, eta: d.eta || null },
+          statusPatch: { status: "split" },
+        });
+        priceableLines.push(approvedLine({ ...r, quantity: stock.available }, candidate, "split fulfilment — immediate portion", line.quantity));
+        priceableLines.push(backorderedLine(r, candidate, stock.short_by, line.quantity, d.eta));
+      }
+    }
+
+    const { lines: finalLines } = await getOrder(orderId);
+    const updatedOrder = await setOrderStatus({ orderId, status: deriveOrderStatus(finalLines.map((l) => l.status)) });
+    const { lines: pricedLines, totals } = priceOrder(priceableLines);
+
+    res.json({ order: { id: updatedOrder.id, status: updatedOrder.status }, lines: pricedLines, totals });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "failed to confirm order" });
+  }
+}
+
+app.get("/api/admin/orders", requireAdminApi, listAdminOrdersHandler);
+app.get("/api/admin/orders/:id", requireAdminApi, getAdminOrderHandler);
+app.post("/api/admin/orders/:id/confirm", requireAdminApi, confirmAdminOrderHandler);
+app.get("/api/admin/stock", requireAdminApi, stockListHandler);
+app.post("/api/admin/stock", requireAdminApi, stockSetHandler);
 
 // External systems (another company's dispatch tool, a future SAP/Tally
 // adapter) hit the versioned, key-gated path instead. Same handlers, same

@@ -85,7 +85,7 @@ export async function getOrder(orderId) {
   return { order, lines: lines.sort(byLineIndex) };
 }
 
-// Newest first, for the operator's order list (commit 4).
+// Newest first, for the operator's order list.
 export async function listOrders({ limit = 50 } = {}) {
   const supabase = db();
   return unwrap(
@@ -95,6 +95,23 @@ export async function listOrders({ limit = 50 } = {}) {
       .order("created_at", { ascending: false })
       .limit(limit)
   );
+}
+
+// Same, with a line count per order for the /admin list view — one query
+// via Supabase's embedded count rather than N+1 round trips.
+export async function listOrdersWithLineCounts({ limit = 50 } = {}) {
+  const supabase = db();
+  const rows = unwrap(
+    await supabase
+      .from("orders")
+      .select("*, order_lines(count)")
+      .order("created_at", { ascending: false })
+      .limit(limit)
+  );
+  return rows.map(({ order_lines, ...order }) => ({
+    ...order,
+    line_count: order_lines?.[0]?.count ?? 0,
+  }));
 }
 
 // The buyer resolving an "ambiguous" line by picking one of the candidates

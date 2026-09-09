@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>order-agent — operator</title>
+<style>
+  :root {
+    --bg: #FDF8F5; --card: #ffffff; --border: #EBE0D8; --divider: #F0E8E2;
+    --text: #2C1810; --muted: #6B5248; --faint: #A08070;
+    --accent: #C0593A; --accent-soft: #FAEEE9;
+    --ok-bg: #dcfce7; --ok-text: #166534; --ok-border: #bbf7d0;
+    --warn-bg: #fef3c7; --warn-text: #92400e; --warn-border: #fde68a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .topbar { background: #fff; border-bottom: 1px solid var(--border); padding: 14px 20px;
+    display: flex; justify-content: space-between; align-items: center; }
+  .brand { color: var(--accent); font-weight: 800; font-size: 1.125rem; letter-spacing: -0.01em; }
+  .tag { color: var(--faint); font-size: 0.625rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .08em; margin-top: 1px; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 80px; }
+  h1 { font-size: 1.25rem; font-weight: 700; margin: 0 0 14px; }
+  .section-label { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--accent); margin: 28px 0 10px; }
+  .section-label:first-of-type { margin-top: 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 1rem;
+    box-shadow: 0 1px 2px rgba(44,24,16,.04); padding: 18px; }
+  .order-row { display: flex; align-items: center; gap: 14px; padding: 13px 0;
+    border-top: 1px solid var(--divider); text-decoration: none; color: inherit; }
+  .order-row:first-child { border-top: none; }
+  .order-row:hover .order-text { color: var(--accent); }
+  .order-text { flex: 1; font-size: 0.875rem; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .order-meta { color: var(--faint); font-size: 0.75rem; width: 150px; }
+  .order-lines { color: var(--faint); font-size: 0.75rem; width: 60px; }
+  .status-pill { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+    padding: 3px 10px; border-radius: 999px; border: 1px solid; white-space: nowrap; width: 130px; text-align: center; }
+  .s-submitted, .s-in_review { background: var(--warn-bg); color: var(--warn-text); border-color: var(--warn-border); }
+  .s-confirmed { background: var(--ok-bg); color: var(--ok-text); border-color: var(--ok-border); }
+  .s-partially_confirmed { background: var(--accent-soft); color: var(--accent); border-color: #f0d5cc; }
+  .s-cancelled { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+  .empty { color: var(--faint); font-size: 0.8125rem; padding: 10px 0; }
+  .cand { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--divider); }
+  .cand:first-child { border-top: none; }
+  .cand label { flex: 1; font-size: 0.875rem; }
+  button { font: inherit; cursor: pointer; border-radius: 0.625rem; border: 1px solid var(--border);
+    background: #fff; color: var(--muted); padding: 5px 11px; font-weight: 500; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.small { padding: 4px 10px; font-size: 0.75rem; }
+  button.logout { border-color: transparent; color: var(--faint); font-size: 0.75rem; background: none; }
+  button.logout:hover { color: var(--accent); }
+  .adapter-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--divider); }
+  .adapter-row:first-child { border-top: none; }
+  .adapter-name { flex: 1; font-size: 0.875rem; font-weight: 500; }
+  .adapter-desc { color: var(--faint); font-size: 0.75rem; }
+  .soon-pill { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+    padding: 3px 9px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-text);
+    border: 1px solid var(--warn-border); }
+  .sub { color: var(--muted); font-size: 0.8125rem; margin: 0 0 12px; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div><span class="brand">Order Agent</span><div class="tag">Operator</div></div>
+  <form method="POST" action="/admin/logout"><button class="logout" type="submit">Log out</button></form>
+</div>
+<div class="wrap">
+  <h1>Orders</h1>
+  <div class="card"><div id="orderList" class="empty">Loading…</div></div>
+
+  <div class="section-label">Stock — Manual entry</div>
+  <div class="card">
+    <p class="sub">The only genuinely live data in this catalogue — everything else (price, HSN, GST) is
+      static sample data. Editing a value here takes effect immediately on every match/approval check.</p>
+    <div id="stockTable" class="empty">Loading…</div>
+  </div>
+
+  <div class="section-label">Stock — Connect an ERP</div>
+  <div class="card">
+    <p class="sub">Sourcing stock automatically from a distributor's own system, instead of a manual number
+      per SKU. Not built yet — no real tenant to test against.</p>
+    <div class="adapter-row">
+      <div class="adapter-name">Tally<div class="adapter-desc">Export/import via Tally XML</div></div>
+      <span class="soon-pill">Coming soon</span>
+    </div>
+    <div class="adapter-row">
+      <div class="adapter-name">SAP Business One<div class="adapter-desc">Service Layer API</div></div>
+      <span class="soon-pill">Coming soon</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const STATUS_LABEL = {
+  submitted: "Submitted", in_review: "Being reviewed",
+  confirmed: "Confirmed", partially_confirmed: "Partially confirmed", cancelled: "Cancelled",
+};
+
+function timeAgo(iso) {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
+}
+
+async function loadOrders() {
+  const list = document.getElementById("orderList");
+  try {
+    const res = await fetch("/api/admin/orders");
+    if (!res.ok) throw new Error("failed to load orders");
+    const { orders } = await res.json();
+    if (!orders.length) {
+      list.innerHTML = `<div class="empty">No orders yet.</div>`;
+      return;
+    }
+    list.innerHTML = orders.map((o) => `
+      <a class="order-row" href="/admin/orders/${o.id}">
+        <span class="order-text">${o.order_text}</span>
+        <span class="order-meta">${o.buyer_name || "—"} · ${timeAgo(o.created_at)}</span>
+        <span class="order-lines">${o.line_count} line${o.line_count === 1 ? "" : "s"}</span>
+        <span class="status-pill s-${o.status}">${STATUS_LABEL[o.status] || o.status}</span>
+      </a>
+    `).join("");
+  } catch (err) {
+    list.innerHTML = `<div class="empty">${err.message}</div>`;
+  }
+}
+
+async function loadStock() {
+  const table = document.getElementById("stockTable");
+  const res = await fetch("/api/admin/stock");
+  const data = await res.json();
+  table.innerHTML = data.skus.map((s) => `
+    <div class="cand" data-sku="${s.sku_code}">
+      <label>${s.label}
+        <span style="color:var(--faint); font-size:0.75rem;"> (${s.sku_code}, ${s.uom})</span>
+        ${s.source === "manual_override" ? `<span style="color:var(--accent); font-size:0.6875rem; font-weight:700;"> · manually set</span>` : ""}
+      </label>
+      <input type="text" inputmode="decimal" value="${s.qty ?? ""}"
+        style="width:80px; background:var(--bg); border:1px solid var(--border); border-radius:0.5rem; padding:5px 8px; font:inherit;" />
+      <button class="small" onclick="saveStock('${s.sku_code}', this)">Save</button>
+    </div>
+  `).join("");
+}
+
+window.saveStock = async function (skuCode, btn) {
+  const row = btn.closest(".cand");
+  const input = row.querySelector("input");
+  const qty = Number(input.value);
+  if (!Number.isFinite(qty) || qty < 0) { input.style.borderColor = "red"; return; }
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const res = await fetch("/api/admin/stock", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sku_code: skuCode, qty }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error);
+    await loadStock();
+  } catch (err) {
+    alert("Failed to save: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "Save";
+  }
+};
+
+loadOrders();
+loadStock();
+</script>
+</body>
+</html>

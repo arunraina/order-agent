@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>order-agent — operator</title>
+<style>
+  :root {
+    --bg: #FDF8F5; --card: #ffffff; --border: #EBE0D8; --divider: #F0E8E2;
+    --text: #2C1810; --muted: #6B5248; --faint: #A08070;
+    --accent: #C0593A; --accent-soft: #FAEEE9;
+    --ok-bg: #dcfce7; --ok-text: #166534; --ok-border: #bbf7d0;
+    --warn-bg: #fef3c7; --warn-text: #92400e; --warn-border: #fde68a;
+    --bad-bg: #fee2e2; --bad-text: #991b1b; --bad-border: #fecaca;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .topbar { background: #fff; border-bottom: 1px solid var(--border); padding: 14px 20px;
+    display: flex; justify-content: space-between; align-items: center; }
+  .brand { color: var(--accent); font-weight: 800; font-size: 1.125rem; letter-spacing: -0.01em; }
+  .tag { color: var(--faint); font-size: 0.625rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .08em; margin-top: 1px; }
+  .back { color: var(--muted); font-size: 0.8125rem; text-decoration: none; }
+  .back:hover { color: var(--accent); }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 80px; }
+  .head-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+  h1 { font-size: 1.125rem; font-weight: 700; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 0.8125rem; margin: 0; }
+  .status-pill { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+    padding: 5px 13px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+  .s-submitted, .s-in_review { background: var(--warn-bg); color: var(--warn-text); border-color: var(--warn-border); }
+  .s-confirmed { background: var(--ok-bg); color: var(--ok-text); border-color: var(--ok-border); }
+  .s-partially_confirmed { background: var(--accent-soft); color: var(--accent); border-color: #f0d5cc; }
+  .line { background: var(--card); border: 1px solid var(--border); border-radius: 1rem;
+    box-shadow: 0 1px 2px rgba(44,24,16,.04); padding: 18px; margin-bottom: 12px; }
+  .line h3 { margin: 0 0 4px; font-size: 0.9375rem; font-weight: 600; }
+  .verdict { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    padding: 2px 9px; border-radius: 999px; margin-left: 8px; vertical-align: middle; border: 1px solid; }
+  .v-matched { background: var(--ok-bg); color: var(--ok-text); border-color: var(--ok-border); }
+  .v-ambiguous { background: var(--warn-bg); color: var(--warn-text); border-color: var(--warn-border); }
+  .v-no_match { background: var(--bad-bg); color: var(--bad-text); border-color: var(--bad-border); }
+  .status-line { font-size: 0.75rem; color: var(--faint); margin: 0 0 10px; }
+  .cand { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-top: 1px solid var(--divider); }
+  .cand:first-child { border-top: none; }
+  .cand label { flex: 1; cursor: pointer; font-size: 0.875rem; }
+  .cand input[type=radio] { accent-color: var(--accent); }
+  .stock-ok { color: var(--ok-text); font-size: 0.75rem; font-weight: 500; }
+  .stock-bad { color: var(--warn-text); font-size: 0.75rem; font-weight: 600; }
+  .stock-out { color: var(--bad-text); font-size: 0.75rem; font-weight: 600; }
+  .buyer-note { font-size: 0.8125rem; color: var(--muted); font-style: italic; margin-bottom: 10px; }
+  .hint { font-size: 0.75rem; color: var(--faint); margin-top: 4px; }
+  .actions { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider);
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .actions input[type=text] { background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 0.625rem; padding: 6px 9px; font: inherit; width: 160px; }
+  button { font: inherit; cursor: pointer; border-radius: 0.75rem; border: 1px solid var(--border);
+    background: #fff; color: var(--muted); padding: 7px 13px; font-weight: 500; transition: .15s; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button:disabled:hover { border-color: var(--border); color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: #a84d31; color: #fff; }
+  button.primary:disabled { opacity: .4; }
+  .decided { border-color: var(--accent) !important; background: var(--accent-soft) !important; color: var(--accent) !important; }
+  .banner { background: var(--ok-bg); border: 1px solid var(--ok-border); color: var(--ok-text);
+    padding: 12px 16px; border-radius: 0.75rem; margin: 16px 0; font-size: 0.875rem; }
+  pre { background: #fff; border: 1px solid var(--border); border-radius: 0.75rem; padding: 14px;
+    overflow-x: auto; font-size: 0.75rem; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div><span class="brand">Order Agent</span><div class="tag">Operator</div></div>
+  <a class="back" href="/admin">&larr; All orders</a>
+</div>
+<div class="wrap" id="wrap">
+  <p class="sub">Loading order…</p>
+</div>
+
+<script>
+const orderId = window.location.pathname.split("/").filter(Boolean).pop();
+const STATUS_LABEL = {
+  submitted: "Submitted", in_review: "Being reviewed",
+  confirmed: "Confirmed", partially_confirmed: "Partially confirmed", cancelled: "Cancelled",
+};
+
+let order = null;
+let lines = [];
+let decisions = []; // { candidateIndex, action, eta, note } per line, indexed like `lines`
+
+function stockLabel(stock) {
+  if (!stock) return `<span class="stock-bad">no stock data</span>`;
+  if (stock.status === "in_stock") return `<span class="stock-ok">${stock.available} in stock</span>`;
+  if (stock.status === "out_of_stock") return `<span class="stock-out">OUT OF STOCK</span>`;
+  if (stock.status === "insufficient") return `<span class="stock-bad">only ${stock.available} in stock — short by ${stock.short_by}</span>`;
+  return `<span class="stock-bad">no stock data</span>`;
+}
+
+function chosenCandidate(line) {
+  if (!line.chosen_sku_code) return null;
+  return line.candidates.find((c) => c.sku_code === line.chosen_sku_code) || null;
+}
+
+function setDecision(i, patch) {
+  decisions[i] = { ...decisions[i], ...patch };
+  render();
+}
+window.setDecision = setDecision;
+
+function actionsFor(i, candidate, disableApprove) {
+  const stock = candidate?.stock;
+  const insufficient = stock && stock.status === "insufficient";
+  const chosen = decisions[i]?.action;
+  const dis = disableApprove ? "disabled" : "";
+  let html = `<div class="actions">`;
+  if (insufficient) {
+    html += `
+      <button ${dis} class="${chosen === "partial" ? "decided" : ""}" onclick="setDecision(${i}, {action:'partial'})">Partial (${stock.available})</button>
+      <button ${dis} class="${chosen === "split" ? "decided" : ""}" onclick="setDecision(${i}, {action:'split'})">Split + ETA</button>
+      ${chosen === "split" ? `<input type="text" placeholder="e.g. 3 days" value="${decisions[i]?.eta ?? ""}" oninput="setDecision(${i}, {eta:this.value})" />` : ""}
+      <button ${dis} class="${chosen === "approve_full" ? "decided" : ""}" onclick="setDecision(${i}, {action:'approve_full'})">Full anyway</button>
+      <button class="${chosen === "skip" ? "decided" : ""}" onclick="setDecision(${i}, {action:'skip'})">Skip</button>
+    `;
+  } else {
+    html += `
+      <button ${dis} class="${chosen === "approve_full" ? "decided" : ""}" onclick="setDecision(${i}, {action:'approve_full'})">Approve</button>
+      <button class="${chosen === "skip" ? "decided" : ""}" onclick="setDecision(${i}, {action:'skip'})">Skip</button>
+    `;
+  }
+  html += `</div>`;
+  return html;
+}
+
+function lineCard(line, i) {
+  const d = decisions[i] || {};
+  const qty = `${line.quantity ?? "?"} ${line.unit ?? ""}`.trim();
+  let head = `<h3>"${line.raw_text}" <span class="verdict v-${line.verdict}">${line.verdict}</span></h3>
+    <div class="status-line">Requested: ${qty}${line.status === "resolved" || line.status === "approved" || line.status === "partial" || line.status === "split" ? "" : ` &middot; line status: ${line.status}`}</div>`;
+
+  if (line.note) {
+    head += `<div class="buyer-note">Buyer said: "${line.note}"</div>`;
+  }
+
+  let body;
+  const already = chosenCandidate(line);
+
+  if (already) {
+    body = `<div class="cand"><label>${already.label} (score ${already.score}) — ${stockLabel(already.stock)}</label></div>`;
+    body += actionsFor(i, already, false);
+  } else if (line.verdict === "no_match" || !line.candidates?.length) {
+    body = `<div class="actions">
+      <input type="text" placeholder="manual note (or leave blank to skip)" value="${d.note ?? ""}"
+        oninput="setDecision(${i}, {action:'manual_note', note:this.value})" />
+      <button class="${d.action === "skip" ? "decided" : ""}" onclick="setDecision(${i}, {action:'skip'})">Skip</button>
+    </div>`;
+  } else {
+    // ambiguous, unresolved — nothing pre-selected, Approve disabled until picked
+    const idx = d.candidateIndex;
+    const hasSelection = idx !== null && idx !== undefined;
+    const chips = line.candidates.map((c, ci) => `
+      <div class="cand">
+        <input type="radio" name="cand${i}" ${ci === idx ? "checked" : ""} onchange="setDecision(${i}, {candidateIndex:${ci}, action:null})" />
+        <label>${c.label} (score ${c.score}) — ${stockLabel(c.stock)}</label>
+      </div>
+    `).join("");
+    body = chips;
+    if (!hasSelection) body += `<div class="hint">Select a candidate above before approving.</div>`;
+    body += actionsFor(i, hasSelection ? line.candidates[idx] : undefined, !hasSelection);
+  }
+
+  return `<div class="line">${head}${body}</div>`;
+}
+
+function render() {
+  const wrap = document.getElementById("wrap");
+  const allDecided = lines.every((_, i) => decisions[i]?.action);
+  wrap.innerHTML = `
+    <div class="head-row">
+      <div>
+        <h1>${order.buyer_name || "Unnamed buyer"}</h1>
+        <p class="sub">${order.order_text}</p>
+      </div>
+      <span class="status-pill s-${order.status}">${STATUS_LABEL[order.status] || order.status}</span>
+    </div>
+    ${lines.map(lineCard).join("")}
+    <button class="primary" id="confirmBtn" ${allDecided ? "" : "disabled"}>Confirm (${decisions.filter((d) => d?.action).length}/${lines.length} decided)</button>
+    <div id="result"></div>
+  `;
+  document.getElementById("confirmBtn").addEventListener("click", confirmOrder);
+}
+
+async function load() {
+  const res = await fetch(`/api/admin/orders/${orderId}`);
+  if (!res.ok) {
+    document.getElementById("wrap").innerHTML = `<p class="sub">Order not found.</p>`;
+    return;
+  }
+  const data = await res.json();
+  order = data.order;
+  lines = data.lines;
+  decisions = lines.map((l) => ({ candidateIndex: null }));
+  render();
+}
+
+async function confirmOrder() {
+  const btn = document.getElementById("confirmBtn");
+  btn.disabled = true;
+  btn.textContent = "Confirming…";
+  const payload = {
+    decisions: lines.map((l, i) => ({
+      lineId: l.id,
+      action: decisions[i]?.action,
+      candidateIndex: decisions[i]?.candidateIndex,
+      eta: decisions[i]?.eta,
+      note: decisions[i]?.note,
+    })),
+  };
+  try {
+    const res = await fetch(`/api/admin/orders/${orderId}/confirm`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "failed");
+    document.getElementById("result").innerHTML =
+      `<div class="banner">Order ${STATUS_LABEL[data.order.status] || data.order.status}. Payable now: ₹${data.totals.now.total} &middot; Pending on backorder: ₹${data.totals.backordered.total}</div>
+       <pre>${JSON.stringify(data.lines, null, 2)}</pre>`;
+    await load();
+  } catch (err) {
+    document.getElementById("result").innerHTML = `<p style="color:#991b1b">${err.message}</p>`;
+    btn.disabled = false;
+    btn.textContent = "Confirm";
+  }
+}
+
+load();
+</script>
+</body>
+</html>

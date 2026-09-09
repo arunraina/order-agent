@@ -6,34 +6,43 @@ contractor's order as unstructured text (WhatsApp, email — see
 and this turns it into a reviewable, typed proposal — never an automatic
 write.
 
-**Nothing in this codebase calls an order-creation endpoint.** The only
-output is a draft JSON file a human has explicitly approved, line by line,
-via either the CLI or the local web UI below.
+**Nothing in this codebase calls an order-creation endpoint.** A buyer's
+order only ever becomes a proposal — every line still needs an explicit
+human decision, from the buyer (resolving which product they meant) or the
+operator (approving what actually ships), before anything is final.
 
 ## Setup
 
 ```
 npm install
-cp .env.example .env    # then put a real ANTHROPIC_API_KEY in .env
+cp .env.example .env    # then fill in the values below
 ```
 
-Persistence (orders/order_lines/decisions) needs a Supabase project too — see
-[Persistence](#persistence) below.
+Needs three things in `.env` to run for real: `ANTHROPIC_API_KEY` (extraction),
+Supabase credentials (persistence — see [Persistence](#persistence)), and
+`ADMIN_PASSCODE` (operator login — see [Operator view](#operator-view)).
 
 ## Running it
 
-**Web UI** (recommended — lets you click through the approval flow):
+**Web UI** — two separate roles, two separate views:
 
 ```
 node server.js
 ```
 
-Then open **http://localhost:3500** in your own browser. Paste an order,
-or use one of the three sample-order buttons, hit **Process order**, then
-resolve each line (approve / skip / pick a candidate / partial / split with
-an ETA) and hit **Confirm order**.
+- **Buyer** — open **http://localhost:3500**. Give a name/phone (optional)
+  and paste an order, or use a sample-order button, and submit. You land on
+  `/orders/:id`, a status page that shows each line's outcome — resolved
+  (product + stock band), needing a quick pick between a couple of options,
+  or "couldn't match this, tell us more" — and updates on its own once an
+  operator has acted.
+- **Operator** — open **http://localhost:3500/admin** and sign in with
+  `ADMIN_PASSCODE`. Lists every order; opening one shows the full review
+  queue (scores, exact stock, candidate picks, partial/split/skip) and a
+  Confirm button that sets the order's final status.
 
-**CLI** (same pipeline, terminal-driven):
+**CLI** (same extract+match pipeline, terminal-driven, no persistence —
+useful for iterating on `src/match.js` without touching a database):
 
 ```
 node src/run.js 0        # extract + match only, prints verdicts, no approval
@@ -63,16 +72,55 @@ src/pricing.js     prices approved/backordered lines from unit_price + gst_rate,
 src/roi.js         a sizing model (minutes saved × order volume) — assumptions
                     you'd validate with real timing data, not a measured result
 src/decide.js       pure decision primitives (approvedLine, skippedLine,
-                    backorderedLine) — shared by both the CLI and the web UI,
-                    so "what does an approved line look like" has one answer
+                    backorderedLine) — shared by the CLI, the external API,
+                    and the operator confirm handler, so "what does an
+                    approved line look like" has one answer everywhere
 src/run.js         orchestrates extract → match → verdict counts
-src/approve.js      CLI: walks a human through every line, writes the priced draft
+src/approve.js      CLI: walks a human through every line, writes a local
+                    priced draft — no Supabase, a standalone tool
 src/db.js          Supabase persistence — orders/order_lines/decisions
-                    (see Persistence below); not yet wired into any route
-server.js + public/  web UI: same decisions, browser-driven instead of stdin —
-                    plus a "Manage stock" panel and a key-gated /api/v1/*
-                    surface for external callers
+                    (see Persistence below)
+src/buyer-view.js  pure transform from a persisted line/order to what a
+                    buyer is allowed to see — no score, no sku_code, no
+                    raw candidate list (see Buyer view below)
+server.js          two gated web surfaces (buyer, operator — see below)
+                    plus the key-gated /api/v1/* external API
+public/            buyer-facing pages, served by express.static directly
+views/             operator-facing pages — deliberately NOT under public/,
+                    so express.static can't serve them straight past the
+                    /admin passcode check; server.js sendFile()s them only
+                    after requireAdminPage/requireAdminApi passes
 ```
+
+## Buyer view
+
+`public/index.html` (submit) and `public/order.html` (`/orders/:id`, track).
+A buyer never sees a match score, a `sku_code`, or the full candidate list —
+`src/buyer-view.js`'s `toBuyerLine`/`toBuyerOrder` are the one place that
+shape gets built, reused by every route that talks to a buyer's browser.
+Resolving an ambiguous line sends the array position of the option they
+clicked, never a `sku_code` — nothing buyer-supplied can select a SKU
+outside what `findCandidates()` actually returned for that line.
+
+## Operator view
+
+`/admin` (order list) and `/admin/orders/:id` (the full review queue —
+scores, exact stock, candidate picks, partial/split/skip, Confirm). Gated by
+one shared passcode from `ADMIN_PASSCODE` — deliberately not a real login
+system: there's one operator role here, not per-user accounts. If unset, the
+server logs a dev fallback passcode at startup.
+
+Confirming writes one `decisions` row per line action (`approve_full`,
+`partial`, `split`, `skip`, `manual_note`), and once every line has a final
+status the order itself moves to `confirmed` (every line approved in full)
+or `partially_confirmed` (anything else — a mix, or a fully skipped order,
+is still a real recorded outcome, not silently "confirmed").
+
+Stock management lives here too: manual entry (writes to
+`data/stock-overrides.json`, same as `/api/v1/stock`), plus an explicit,
+honest "Coming soon" placeholder for Tally / SAP Business One adapters —
+not built, no real tenant to test against yet, but named rather than
+implied.
 
 ## Persistence
 
@@ -104,17 +152,20 @@ Supabase Auth. RLS is enabled on all three tables with no policies for
 `anon`/`authenticated`, so a client using the public anon key gets nothing;
 service_role bypasses RLS by design.
 
-`src/db.js` isn't called from any route yet — that lands with the buyer and
-operator views in the next two pieces of work. For now it's a standalone,
-independently-usable module: `createOrder`, `getOrder`, `listOrders`,
+`createOrder`, `getOrder`, `listOrders`, `listOrdersWithLineCounts`,
 `chooseCandidate`, `recordLineDecision`, `setOrderStatus`, and the pure
 `deriveOrderStatus(lineStatuses)` helper that decides `confirmed` vs.
 `partially_confirmed` from a set of just-decided line statuses.
 
 ## External API
 
-Same handlers as the browser UI, reachable by another system (a distributor's
-own dispatch tool, a future ERP adapter), gated by an `x-api-key` header:
+A separate, older path: `processHandler`/`confirmHandler` run the same
+extract→match pipeline but never touch Supabase — the response is a priced
+draft, same shape as before persistence existed. Nothing in the browser
+calls these any more (the buyer and operator views above own that job now);
+they're kept specifically as the external-system integration surface —
+a distributor's own dispatch tool, a future ERP adapter — gated by an
+`x-api-key` header instead of a browser session:
 
 ```
 GET  /api/v1/health
@@ -130,12 +181,15 @@ fallback key at startup (fine for local testing, not for a public deployment).
 
 ## Live stock
 
-`/api/v1/stock` and the in-app "Manage stock" panel are the one genuinely
-live thing here — everything else (price, HSN, GST rate) stays static sample
-data. This is the "Manual" tier from the companion Griffy Supply case study:
-a distributor sets their own number, no external system involved. Writes go
-to `data/stock-overrides.json` (gitignored — it's runtime state, not a
+Stock is the one genuinely live thing in this catalogue — everything else
+(price, HSN, GST rate) stays static sample data. This is the "Manual" tier
+from the companion Griffy Supply case study: a distributor sets their own
+number, no external system involved. Writes go to
+`data/stock-overrides.json` (gitignored — it's runtime state, not a
 fixture) and take effect immediately, overriding the catalogue's baseline.
+Reachable from the operator's "Manage stock" panel (`/api/admin/stock`,
+passcode-gated) or externally (`/api/v1/stock`, key-gated) — same two
+handlers either way.
 
 Tally and SAP Business One integration are documented as the "Lite" and
 "Connected" tiers in that same case study but aren't implemented here — no
