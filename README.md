@@ -17,6 +17,9 @@ npm install
 cp .env.example .env    # then put a real ANTHROPIC_API_KEY in .env
 ```
 
+Persistence (orders/order_lines/decisions) needs a Supabase project too — see
+[Persistence](#persistence) below.
+
 ## Running it
 
 **Web UI** (recommended — lets you click through the approval flow):
@@ -64,10 +67,49 @@ src/decide.js       pure decision primitives (approvedLine, skippedLine,
                     so "what does an approved line look like" has one answer
 src/run.js         orchestrates extract → match → verdict counts
 src/approve.js      CLI: walks a human through every line, writes the priced draft
+src/db.js          Supabase persistence — orders/order_lines/decisions
+                    (see Persistence below); not yet wired into any route
 server.js + public/  web UI: same decisions, browser-driven instead of stdin —
                     plus a "Manage stock" panel and a key-gated /api/v1/*
                     surface for external callers
 ```
+
+## Persistence
+
+Orders, their lines, and every decision made on them are stored in Postgres
+via Supabase, in a dedicated `order_agent` schema (not `public` — this can
+share a Supabase project with other apps without any table-name collision).
+
+```
+order_agent.orders        one row per submitted order (buyer, raw text, status)
+order_agent.order_lines   one row per extracted line (verdict, candidates,
+                           chosen_sku_code, status) — candidates carries the
+                           full scored list with sku_code, so this table (and
+                           only this table) is operator-facing, not buyer-safe
+order_agent.decisions     append-only audit log — one row per action, ever;
+                           never updated or deleted
+```
+
+Set up:
+
+```
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=...   # Settings > API > service_role secret key
+```
+
+`src/db.js` uses the **service_role** key deliberately, not the anon key —
+this server is the trusted party writing these tables, the same reason
+`ORDER_AGENT_API_KEY` gates the external surface rather than relying on
+Supabase Auth. RLS is enabled on all three tables with no policies for
+`anon`/`authenticated`, so a client using the public anon key gets nothing;
+service_role bypasses RLS by design.
+
+`src/db.js` isn't called from any route yet — that lands with the buyer and
+operator views in the next two pieces of work. For now it's a standalone,
+independently-usable module: `createOrder`, `getOrder`, `listOrders`,
+`chooseCandidate`, `recordLineDecision`, `setOrderStatus`, and the pure
+`deriveOrderStatus(lineStatuses)` helper that decides `confirmed` vs.
+`partially_confirmed` from a set of just-decided line statuses.
 
 ## External API
 
